@@ -1,6 +1,16 @@
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { db, subscribeToDBUpdates, syncStaffWithSupabase } from "./lib/database";
+import {
+  db,
+  subscribeToDBUpdates,
+  loadShopData,
+  subscribeToRealtime,
+  unsubscribeFromRealtime,
+  signInWithShopCredentials,
+  registerShopWithCredentials,
+  signOutFromSupabase,
+  restoreSession,
+} from "./lib/database";
 import { Product, Sale, Customer, Staff, Shop, AppNotification } from "./types";
 import DashboardOverview from "./components/DashboardOverview";
 import InventoryManager from "./components/InventoryManager";
@@ -13,11 +23,7 @@ import SettingsSubscription from "./components/SettingsSubscription";
 import WhatsAppEmulator from "./components/WhatsAppEmulator";
 import ResellerWebsite from "./components/ResellerWebsite";
 
-import { 
-  Package, ShoppingCart, Users, FileText, Globe, Key, Bell, 
-  Smartphone, LogOut, Check, Sparkles, LayoutDashboard, Settings, 
-  Lock, AlertTriangle, Menu, X, ArrowUpRight, ChevronDown 
-} from "lucide-react";
+import { Package, ShoppingCart, Users, FileText, Globe, Key, Bell, Smartphone, LogOut, Check, Sparkles, LayoutDashboard, Settings, Lock, TriangleAlert as AlertTriangle, Menu, X, ArrowUpRight, ChevronDown } from "lucide-react";
 
 export default function App() {
   // ----------------------------------------------------
@@ -40,35 +46,26 @@ export default function App() {
   // ----------------------------------------------------
   // DATABASE SUBSCRIPTIONS & SYNC
   // ----------------------------------------------------
-  const [shops, setShops] = useState<Shop[]>(db.getShops());
-  const [currentShop, setCurrentShop] = useState<Shop | null>(() => {
-    const savedShopId = localStorage.getItem("restockr_currentShopId");
-    const shopsList = db.getShops();
-    if (savedShopId) {
-      const found = shopsList.find(s => s.id === savedShopId);
-      if (found) return found;
-    }
-    return shopsList[0] || null;
-  });
+  const [shops, setShops] = useState<Shop[]>([]);
+  const [currentShop, setCurrentShop] = useState<Shop | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
 
   // Reactive DB States
-  const [products, setProducts] = useState<Product[]>(currentShop ? db.getProducts(currentShop.id) : []);
-  const [sales, setSales] = useState<Sale[]>(currentShop ? db.getSales(currentShop.id) : []);
-  const [customers, setCustomers] = useState<Customer[]>(currentShop ? db.getCustomers(currentShop.id) : []);
-  const [staff, setStaff] = useState<Staff[]>(currentShop ? db.getStaff(currentShop.id) : []);
-  const [notifications, setNotifications] = useState<AppNotification[]>(currentShop ? db.getNotifications(currentShop.id) : []);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [sales, setSales] = useState<Sale[]>([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [staff, setStaff] = useState<Staff[]>([]);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
 
   // Expiry lock state (can be forced via subscription settings)
   const [isSimulatedExpired, setIsSimulatedExpired] = useState(false);
 
-  // Sync state whenever DB updates or selected shop changes
+  // Sync state from in-memory cache (kept fresh by realtime subscriptions)
   const syncStates = () => {
     const updatedShops = db.getShops();
     setShops(updatedShops);
 
-    const activeShop = updatedShops.find(s => s.id === (currentShop?.id || "")) || updatedShops[0] || null;
-    setCurrentShop(activeShop);
-
+    const activeShop = updatedShops.find(s => s.id === (currentShop?.id || "")) || null;
     if (activeShop) {
       setProducts(db.getProducts(activeShop.id));
       setSales(db.getSales(activeShop.id));
@@ -84,17 +81,53 @@ export default function App() {
     }
   };
 
+  // Restore session on mount (auto-login from Supabase Auth)
   useEffect(() => {
-    syncStates();
-    if (currentShop?.id) {
-      syncStaffWithSupabase(currentShop.id);
-    }
-    // Subscribe to database modifications in real-time
-    const unsubscribe = subscribeToDBUpdates(() => {
+    let unsubscribe: (() => void) | null = null;
+    (async () => {
+      const { shop } = await restoreSession();
+      if (shop) {
+        await loadShopData(shop.id);
+        subscribeToRealtime(shop.id);
+        setCurrentShop(shop);
+        setIsLoggedIn(true);
+        setShops(db.getShops());
+        setProducts(db.getProducts(shop.id));
+        setSales(db.getSales(shop.id));
+        setCustomers(db.getCustomers(shop.id));
+        setStaff(db.getStaff(shop.id));
+        setNotifications(db.getNotifications(shop.id));
+      }
+      setIsAuthLoading(false);
+
+      // Subscribe to in-memory cache updates (triggered by realtime)
+      unsubscribe = subscribeToDBUpdates(() => {
+        syncStates();
+      });
+    })();
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ----------------------------------------------------
+  // OWNER AUTH STATE (declared before effects that reference it)
+  // ----------------------------------------------------
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [authMode, setAuthMode] = useState<"select" | "signin" | "register">("select");
+  const [authUsername, setAuthUsername] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [isAuthSubmitting, setIsAuthSubmitting] = useState(false);
+
+  // Re-sync when shop changes
+  useEffect(() => {
+    if (currentShop?.id && isLoggedIn) {
       syncStates();
-    });
-    return () => unsubscribe();
-  }, [currentShop?.id]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentShop?.id, isLoggedIn]);
 
   // Profile Menu Dropdown & Logout Confirmation Modal states
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
@@ -133,17 +166,7 @@ export default function App() {
     };
   }, [isProfileMenuOpen]);
 
-  // ----------------------------------------------------
-  // OWNER AUTH STATE
-  // ----------------------------------------------------
-  const [isLoggedIn, setIsLoggedIn] = useState(() => localStorage.getItem("restockr_isLoggedIn") === "true");
-  const [authMode, setAuthMode] = useState<"select" | "signin" | "register">("select");
-  const [authUsername, setAuthUsername] = useState("");
-  const [authPassword, setAuthPassword] = useState("");
-  const [loginError, setLoginError] = useState("");
-
   useEffect(() => {
-    localStorage.setItem("restockr_isLoggedIn", isLoggedIn ? "true" : "false");
     if (isLoggedIn && currentShop) {
       localStorage.setItem("restockr_currentShopId", currentShop.id);
     } else {
@@ -169,33 +192,30 @@ export default function App() {
     setRegShopSlug(suggestedSlug);
   };
 
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!authUsername.trim() || !authPassword.trim()) {
       setLoginError("Credentials cannot be left blank.");
       return;
     }
 
-    const matchedShop = shops.find(s => s.ownerUsername.toLowerCase() === authUsername.trim().toLowerCase());
-    if (!matchedShop) {
-      setLoginError("No registered shop found for this shop username.");
-      return;
-    }
+    setIsAuthSubmitting(true);
+    setLoginError("");
 
-    const passwords = db.getPasswords();
-    const correctPassword = passwords[authUsername.trim().toLowerCase()];
-
-    if (correctPassword && correctPassword === authPassword) {
-      setCurrentShop(matchedShop);
+    const result = await signInWithShopCredentials(authUsername, authPassword);
+    if (result.success && result.shop) {
+      await loadShopData(result.shop.id);
+      subscribeToRealtime(result.shop.id);
+      setCurrentShop(result.shop);
       setIsLoggedIn(true);
-      setLoginError("");
-      setActiveModule("dashboard"); // redirect to the dashboard
+      setActiveModule("dashboard");
     } else {
-      setLoginError("Incorrect password. Please try again.");
+      setLoginError(result.error || "Login failed.");
     }
+    setIsAuthSubmitting(false);
   };
 
-  const handleRegisterSubmit = (e: React.FormEvent) => {
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!regShopName.trim() || !regShopSlug.trim() || !regUsername.trim() || !regPassword.trim() || !regWhatsApp.trim()) {
       setLoginError("All fields are required to register your store.");
@@ -210,68 +230,34 @@ export default function App() {
       return;
     }
 
-    // Check if shop slug is already taken
-    const existingSlug = shops.find(s => s.slug === sanitizedSlug);
-    if (existingSlug) {
-      setLoginError("This store link / subdomain is already taken.");
-      return;
-    }
-
-    // Check if username is already taken
-    const existingUsername = shops.find(s => s.ownerUsername.toLowerCase() === regUsername.trim().toLowerCase());
-    if (existingUsername) {
-      setLoginError("An account with this shop username already exists.");
-      return;
-    }
-
-    const newShopId = `shop-${Date.now()}`;
-    const newShop: Shop = {
-      id: newShopId,
-      name: regShopName.trim(),
-      slug: sanitizedSlug,
-      ownerUsername: regUsername.trim().toLowerCase(),
-      whatsappNumber: regWhatsApp.trim(),
-      subscriptionPlan: "Free Trial",
-      subscriptionStatus: "Active",
-      subscriptionExpiry: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
-      websiteSettings: {
-        showPrices: true,
-        showSoldProducts: true,
-        enableVideoDownloads: true,
-        enableImageDownloads: true,
-        customThemeColor: "#0F172A"
-      },
-      createdAt: new Date().toISOString()
-    };
-
-    // Save shop and password
-    db.saveShop(newShop);
-    db.savePassword(regUsername, regPassword);
-
-    // Add audit log and notification
-    db.addAuditLog(
-      newShopId,
-      "Owner",
-      "Owner",
-      "Shop Setup",
-      `Restockr account for ${newShop.name} was successfully registered and initialized.`
-    );
-    db.addNotification(
-      newShopId,
-      "Welcome to Restockr",
-      `Welcome to Restockr, ${newShop.name}! Your workspace is active and ready for devices.`,
-      "success"
-    );
-
-    // Log the user in
-    setCurrentShop(newShop);
-    setIsLoggedIn(true);
+    setIsAuthSubmitting(true);
     setLoginError("");
-    setActiveModule("dashboard"); // redirect to the dashboard
+
+    const result = await registerShopWithCredentials({
+      shopName: regShopName.trim(),
+      slug: sanitizedSlug,
+      username: regUsername.trim(),
+      password: regPassword,
+      whatsappNumber: regWhatsApp.trim(),
+    });
+
+    if (result.success && result.shop) {
+      await loadShopData(result.shop.id);
+      subscribeToRealtime(result.shop.id);
+      setCurrentShop(result.shop);
+      setIsLoggedIn(true);
+      setActiveModule("dashboard");
+    } else {
+      setLoginError(result.error || "Registration failed.");
+    }
+    setIsAuthSubmitting(false);
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    unsubscribeFromRealtime();
+    await signOutFromSupabase();
     setIsLoggedIn(false);
+    setCurrentShop(null);
     resetQuickActions();
     setAuthUsername("");
     setAuthPassword("");
@@ -281,6 +267,11 @@ export default function App() {
     setRegPassword("");
     setRegWhatsApp("");
     setAuthMode("select");
+    setProducts([]);
+    setSales([]);
+    setCustomers([]);
+    setStaff([]);
+    setNotifications([]);
   };
 
   // ----------------------------------------------------
@@ -340,6 +331,16 @@ export default function App() {
         products={publicProducts} 
         isExpired={isSimulatedExpired || publicShop.subscriptionStatus === "Expired"} 
       />
+    );
+  }
+
+  // If restoring session, show loading state
+  if (isAuthLoading) {
+    return (
+      <div className="min-h-screen bg-[#0A0A0A] flex flex-col items-center justify-center text-white font-sans">
+        <div className="w-8 h-8 border-2 border-teal-500 border-t-transparent rounded-full animate-spin mb-4" />
+        <p className="text-sm text-[#B7BCC7]">Restoring your session...</p>
+      </div>
     );
   }
 
@@ -463,9 +464,10 @@ export default function App() {
               <button
                 type="submit"
                 id="btn-owner-login"
-                className="w-full py-3.5 bg-gradient-to-b from-[#565656] to-[#3A3A3A] border border-[#555555] text-white rounded-xl text-xs font-bold font-display uppercase tracking-wider hover:scale-[0.98] transition-transform cursor-pointer shadow-lg flex items-center justify-center gap-1.5"
+                disabled={isAuthSubmitting}
+                className="w-full py-3.5 bg-gradient-to-b from-[#565656] to-[#3A3A3A] border border-[#555555] text-white rounded-xl text-xs font-bold font-display uppercase tracking-wider hover:scale-[0.98] transition-transform cursor-pointer shadow-lg flex items-center justify-center gap-1.5 disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                Enter Workspace <ArrowUpRight className="w-4 h-4 text-white/60" />
+                {isAuthSubmitting ? "Signing in..." : "Enter Workspace"} {!isAuthSubmitting && <ArrowUpRight className="w-4 h-4 text-white/60" />}
               </button>
             </form>
           </div>
@@ -579,9 +581,10 @@ export default function App() {
               <button
                 type="submit"
                 id="btn-owner-register"
-                className="w-full py-3.5 bg-gradient-to-b from-[#565656] to-[#3A3A3A] border border-[#555555] text-white rounded-xl text-xs font-bold font-display uppercase tracking-wider hover:scale-[0.98] transition-all cursor-pointer shadow-lg flex items-center justify-center gap-1.5"
+                disabled={isAuthSubmitting}
+                className="w-full py-3.5 bg-gradient-to-b from-[#565656] to-[#3A3A3A] border border-[#555555] text-white rounded-xl text-xs font-bold font-display uppercase tracking-wider hover:scale-[0.98] transition-all cursor-pointer shadow-lg flex items-center justify-center gap-1.5 disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                Register & Open Shop <Sparkles className="w-4 h-4 text-white/60" />
+                {isAuthSubmitting ? "Creating shop..." : "Register & Open Shop"} {!isAuthSubmitting && <Sparkles className="w-4 h-4 text-white/60" />}
               </button>
             </form>
           </div>
@@ -1150,7 +1153,7 @@ export default function App() {
                 staffList={staff}
                 onSaveProduct={(p) => db.saveProduct(p)}
                 onSaveSale={(s) => db.saveSale(s)}
-                onUndoLastSale={(shopId, saleId, perf) => db.undoSale(shopId, saleId, perf)}
+                onUndoLastSale={async (shopId, saleId, perf) => db.undoSale(shopId, saleId, perf)}
                 isExpired={isSimulatedExpired}
               />
             </div>

@@ -2,12 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Product, Category, Sale, Shop } from "../types";
 import { db } from "../lib/database";
 import { DEVICE_DATABASE, CATEGORY_BRANDS, BRAND_DISPLAY_NAMES, WARRANTY_OPTIONS, parseShortenedPriceToNumber, formatShortenedPriceInput, getCategoryQuickTags } from "../lib/deviceDb";
-import { 
-  Plus, Search, SlidersHorizontal, Trash2, Edit3, X, Image as ImageIcon, 
-  Video, Save, Sparkles, CheckCircle2, ChevronDown, Package, Layers, 
-  Smartphone, HardDrive, CreditCard, Box, Key, Tag, ShieldCheck, ChevronUp, AlertCircle,
-  FileText, RefreshCw, Play, Loader2
-} from "lucide-react";
+import { Plus, Search, SlidersHorizontal, Trash2, CreditCard as Edit3, X, Image as ImageIcon, Video, Save, Sparkles, CircleCheck as CheckCircle2, ChevronDown, Package, Layers, Smartphone, HardDrive, CreditCard, Box, Key, Tag, ShieldCheck, ChevronUp, CircleAlert as AlertCircle, FileText, RefreshCw, Play, Loader as Loader2 } from "lucide-react";
 import OfficialReceiptModal from "./OfficialReceiptModal";
 import { VideoPlayerModal } from "./VideoPlayerModal";
 import { uploadFileToSupabase } from "../lib/supabase";
@@ -17,9 +12,9 @@ interface InventoryManagerProps {
   shopId: string;
   shop: Shop;
   products: Product[];
-  onSaveProduct: (product: Product) => void;
-  onDeleteProduct: (id: string) => void;
-  onSaveSale?: (sale: Sale) => void;
+  onSaveProduct: (product: Product) => void | Promise<void>;
+  onDeleteProduct: (id: string) => void | Promise<void>;
+  onSaveSale?: (sale: Sale) => void | Promise<void>;
   showAddFormImmediately?: boolean;
   onCloseQuickForm?: () => void;
 }
@@ -80,11 +75,9 @@ export default function InventoryManager({
   }, [shopId, products]);
 
   const handleReverseSale = (saleId: string) => {
-    triggerDeleteConfirm("Transaction Reversal", () => {
-      const result = db.undoSale(shopId, saleId, "Owner");
-      if (result.success) {
-        // Success message or toast
-      } else {
+    triggerDeleteConfirm("Transaction Reversal", async () => {
+      const result = await db.undoSale(shopId, saleId, "Owner");
+      if (!result.success) {
         alert(result.message);
       }
     }, "Are you sure you want to REVERSE / UNDO this sale? This will immediately restore the product back to active available stock, recalculate customer metrics, and completely delete the sales record.");
@@ -224,7 +217,7 @@ export default function InventoryManager({
     onConfirm: () => {}
   });
 
-  const triggerDeleteConfirm = (itemType: string, confirmCallback: () => void, customDesc?: string) => {
+  const triggerDeleteConfirm = (itemType: string, confirmCallback: () => void | Promise<void>, customDesc?: string) => {
     setConfirmModal({
       isOpen: true,
       title: "Delete Confirmation",

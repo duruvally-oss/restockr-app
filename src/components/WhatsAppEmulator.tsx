@@ -1,11 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Product, Sale, Staff, Category, Customer, AuditLog } from "../types";
-import { 
-  Send, Check, CheckCheck, Smartphone, UserCheck, AlertOctagon, HelpCircle, 
-  RefreshCw, Trash2, Edit, ShoppingCart, Eye, ExternalLink, Share2, Info, 
-  ArrowRight, ArrowLeft, Play, Plus, UserPlus, History, ClipboardList, ShieldAlert,
-  Menu, Package, Receipt
-} from "lucide-react";
+import { Send, Check, CheckCheck, Smartphone, UserCheck, OctagonAlert as AlertOctagon, Circle as HelpCircle, RefreshCw, Trash2, CreditCard as Edit, ShoppingCart, Eye, ExternalLink, Share2, Info, ArrowRight, ArrowLeft, Play, Plus, UserPlus, History, ClipboardList, ShieldAlert, Menu, Package, Receipt } from "lucide-react";
 import { DEVICE_DATABASE, CATEGORY_BRANDS, parseShortenedPriceToNumber, getCategoryQuickTags, getCategoryPlaceholder, WARRANTY_OPTIONS } from "../lib/deviceDb";
 import { db } from "../lib/database";
 import { uploadFileToSupabase } from "../lib/supabase";
@@ -20,7 +15,7 @@ interface WhatsAppEmulatorProps {
   staffList: Staff[];
   onSaveProduct: (p: Product) => void;
   onSaveSale: (s: Sale) => void;
-  onUndoLastSale: (shopId: string, saleId: string, performer: string) => { success: boolean; message: string };
+  onUndoLastSale: (shopId: string, saleId: string, performer: string) => Promise<{ success: boolean; message: string }>;
   isExpired: boolean;
 }
 
@@ -2377,8 +2372,8 @@ _Message us now to reserve this device in stock!_`;
                             {/* Staff Action Button */}
                             <div className="flex justify-end pt-1">
                               <button
-                                onClick={() => {
-                                  const res = onUndoLastSale(shopId || "", sale.id, senderName);
+                                onClick={async () => {
+                                  const res = await onUndoLastSale(shopId || "", sale.id, senderName);
                                   addBotMessageOnly(res.message);
                                 }}
                                 className="text-[8px] font-bold text-rose-600 bg-rose-50 border border-rose-100 px-2 py-0.5 rounded hover:bg-rose-100 cursor-pointer"

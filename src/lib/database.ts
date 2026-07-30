@@ -1,17 +1,17 @@
-import { 
-  Shop, 
-  Product, 
-  Sale, 
-  Customer, 
-  Staff, 
-  AuditLog, 
-  AppNotification, 
-  Category, 
-  DeviceCondition 
+import {
+  Shop,
+  Product,
+  Sale,
+  Customer,
+  Staff,
+  AuditLog,
+  AppNotification,
 } from "../types";
 import { supabase, deleteFileFromSupabase } from "./supabase";
 
-// Real-time listener system to notify components of updates immediately
+// ----------------------------------------------------
+// REAL-TIME LISTENER SYSTEM
+// ----------------------------------------------------
 type ListenerCallback = () => void;
 const listeners = new Set<ListenerCallback>();
 
@@ -23,295 +23,700 @@ export function subscribeToDBUpdates(callback: ListenerCallback) {
 }
 
 function notifyListeners() {
-  listeners.forEach(callback => callback());
+  listeners.forEach((callback) => callback());
 }
 
 // ----------------------------------------------------
-// INDEXEDDB MEDIA CACHING FOR IMAGES AND VIDEOS
+// IN-MEMORY CACHE (populated from Supabase, kept in sync via realtime)
+// LocalStorage is only used for lightweight UI state (activeModule, etc.)
 // ----------------------------------------------------
-let mediaDb: IDBDatabase | null = null;
-const mediaImagesCache: Record<string, string[]> = {};
-const mediaVideosCache: Record<string, string> = {};
+let cache: {
+  shops: Shop[];
+  products: Product[];
+  sales: Sale[];
+  customers: Customer[];
+  staff: Staff[];
+  notifications: AppNotification[];
+  auditLogs: AuditLog[];
+} = {
+  shops: [],
+  products: [],
+  sales: [],
+  customers: [],
+  staff: [],
+  notifications: [],
+  auditLogs: [],
+};
 
-if (typeof window !== "undefined" && window.indexedDB) {
-  const request = window.indexedDB.open("restockr_media_store", 2);
-  request.onupgradeneeded = (e: any) => {
-    const db = request.result;
-    if (!db.objectStoreNames.contains("images")) {
-      db.createObjectStore("images");
-    }
-    if (!db.objectStoreNames.contains("videos")) {
-      db.createObjectStore("videos");
-    }
+let currentShopId: string | null = null;
+let isInitialized = false;
+
+// ----------------------------------------------------
+// MAPPING: Supabase snake_case <-> App camelCase
+// ----------------------------------------------------
+function mapShop(row: any): Shop {
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    slug: String(row.slug),
+    ownerUsername: String(row.owner_username),
+    logoUrl: row.logo_url || undefined,
+    whatsappNumber: String(row.whatsapp_number),
+    businessAddress: row.business_address || undefined,
+    businessPhone: row.business_phone || undefined,
+    subscriptionPlan: row.subscription_plan || "Free Trial",
+    subscriptionStatus: row.subscription_status || "Active",
+    subscriptionExpiry: row.subscription_expiry || "",
+    websiteSettings: row.website_settings || {
+      showPrices: true,
+      showSoldProducts: true,
+      enableVideoDownloads: true,
+      enableImageDownloads: true,
+      customThemeColor: "#0F172A",
+    },
+    createdAt: row.created_at || new Date().toISOString(),
   };
-  request.onsuccess = () => {
-    mediaDb = request.result;
-    loadAllMediaFromIndexedDB();
+}
+
+function shopToRow(shop: Shop) {
+  return {
+    id: shop.id,
+    name: shop.name,
+    slug: shop.slug,
+    owner_username: shop.ownerUsername,
+    logo_url: shop.logoUrl || null,
+    whatsapp_number: shop.whatsappNumber,
+    business_address: shop.businessAddress || null,
+    business_phone: shop.businessPhone || null,
+    subscription_plan: shop.subscriptionPlan,
+    subscription_status: shop.subscriptionStatus,
+    subscription_expiry: shop.subscriptionExpiry,
+    website_settings: shop.websiteSettings,
+    created_at: shop.createdAt,
   };
 }
 
-function loadAllMediaFromIndexedDB() {
-  if (!mediaDb) return;
-  
-  try {
-    const tx = mediaDb.transaction(["images", "videos"], "readonly");
-    const imgStore = tx.objectStore("images");
-    const vidStore = tx.objectStore("videos");
-    
-    const imgRequest = imgStore.openCursor();
-    imgRequest.onsuccess = (e: any) => {
-      const cursor = e.target.result;
-      if (cursor) {
-        mediaImagesCache[cursor.key] = cursor.value;
-        cursor.continue();
-      }
-    };
-
-    const vidRequest = vidStore.openCursor();
-    vidRequest.onsuccess = (e: any) => {
-      const cursor = e.target.result;
-      if (cursor) {
-        mediaVideosCache[cursor.key] = cursor.value;
-        cursor.continue();
-      }
-    };
-    
-    tx.oncomplete = () => {
-      console.log("IndexedDB media loaded into memory cache.");
-      notifyListeners();
-    };
-  } catch (err) {
-    console.warn("Failed to load IndexedDB media", err);
-  }
+function mapProduct(row: any): Product {
+  return {
+    id: String(row.id),
+    shop_id: String(row.shop_id),
+    category: row.category,
+    brand: String(row.brand),
+    model: String(row.model),
+    storage: String(row.storage || "N/A"),
+    quantity: Number(row.quantity || 0),
+    sellingPrice: Number(row.selling_price || 0),
+    batteryHealth: row.battery_health || undefined,
+    warranty: String(row.warranty || "No Warranty"),
+    condition: row.condition || [],
+    variant: row.variant || undefined,
+    minimumStockThreshold: row.minimum_stock_threshold !== null ? Number(row.minimum_stock_threshold) : undefined,
+    productVideo: row.product_video || undefined,
+    productImages: row.product_images || [],
+    status: row.status || "Available",
+    createdAt: row.created_at || new Date().toISOString(),
+    sold_at: row.sold_at || undefined,
+  };
 }
 
-function saveMediaToIndexedDB(storeName: "images" | "videos", key: string, value: any) {
-  if (storeName === "images") {
-    mediaImagesCache[key] = value;
-  } else {
-    mediaVideosCache[key] = value;
-  }
-  
-  if (!mediaDb) return;
-  try {
-    const tx = mediaDb.transaction(storeName, "readwrite");
-    tx.objectStore(storeName).put(value, key);
-  } catch (err) {
-    console.error(`Failed to save ${storeName} to IndexedDB`, err);
-  }
+function productToRow(product: Product) {
+  return {
+    id: product.id,
+    shop_id: product.shop_id,
+    category: product.category,
+    brand: product.brand,
+    model: product.model,
+    storage: product.storage,
+    quantity: product.quantity,
+    selling_price: product.sellingPrice,
+    battery_health: product.batteryHealth || null,
+    warranty: product.warranty,
+    condition: product.condition,
+    variant: product.variant || null,
+    minimum_stock_threshold: product.minimumStockThreshold ?? null,
+    product_video: product.productVideo || null,
+    product_images: product.productImages,
+    status: product.status,
+    created_at: product.createdAt,
+    sold_at: product.sold_at || null,
+  };
 }
 
-function deleteMediaFromIndexedDB(key: string) {
-  delete mediaImagesCache[key];
-  delete mediaVideosCache[key];
-  
-  if (!mediaDb) return;
-  try {
-    const tx = mediaDb.transaction(["images", "videos"], "readwrite");
-    if (tx.objectStoreNames.contains("images")) tx.objectStore("images").delete(key);
-    if (tx.objectStoreNames.contains("videos")) tx.objectStore("videos").delete(key);
-  } catch (err) {
-    console.error("Failed to delete media from IndexedDB", err);
-  }
+function mapSale(row: any): Sale {
+  return {
+    id: String(row.id),
+    shop_id: String(row.shop_id),
+    productId: String(row.product_id || ""),
+    productName: String(row.product_name || ""),
+    quantity: Number(row.quantity || 1),
+    unitPrice: Number(row.unit_price || 0),
+    totalAmount: Number(row.total_amount || 0),
+    paymentMethod: row.payment_method || "Cash",
+    splitDetails: row.split_details || undefined,
+    customerName: row.customer_name || "",
+    customerPhone: row.customer_phone || "",
+    soldBy: row.sold_by || "Owner",
+    soldByPhone: row.sold_by_phone || undefined,
+    createdAt: row.created_at || new Date().toISOString(),
+    status: row.status || "Completed",
+  };
 }
 
-// Auto-clear demo data if the user previously loaded the old seed data in their browser
-if (typeof window !== "undefined" && !localStorage.getItem("restockr_demo_cleared_v3")) {
-  localStorage.removeItem("restockr_products");
-  localStorage.removeItem("restockr_sales");
-  localStorage.removeItem("restockr_customers");
-  localStorage.removeItem("restockr_staff");
-  localStorage.removeItem("restockr_audit_logs");
-  localStorage.removeItem("restockr_notifications");
-  localStorage.removeItem("restockr_shops");
-  localStorage.setItem("restockr_demo_cleared_v3", "true");
+function saleToRow(sale: Sale) {
+  return {
+    id: sale.id,
+    shop_id: sale.shop_id,
+    product_id: sale.productId,
+    product_name: sale.productName,
+    quantity: sale.quantity,
+    unit_price: sale.unitPrice,
+    total_amount: sale.totalAmount,
+    payment_method: sale.paymentMethod,
+    split_details: sale.splitDetails || null,
+    customer_name: sale.customerName,
+    customer_phone: sale.customerPhone,
+    sold_by: sale.soldBy,
+    sold_by_phone: sale.soldByPhone || null,
+    created_at: sale.createdAt,
+    status: sale.status || "Completed",
+  };
 }
 
-// Initial seed data for Nigerian Gadget stores
-const INITIAL_SHOPS: Shop[] = [];
-
-const INITIAL_STAFF: Staff[] = [];
-
-const INITIAL_PRODUCTS: Product[] = [];
-
-const INITIAL_CUSTOMERS: Customer[] = [];
-
-const INITIAL_SALES: Sale[] = [];
-
-const INITIAL_AUDIT_LOGS: AuditLog[] = [];
-
-const INITIAL_NOTIFICATIONS: AppNotification[] = [];
-
-// LocalStorage helpers with fallback state
-function getLocalStorageItem<T>(key: string, defaultValue: T): T {
-  try {
-    const value = localStorage.getItem(key);
-    if (value) {
-      return JSON.parse(value);
-    }
-  } catch (e) {
-    console.error("LocalStorage read error", e);
-  }
-  return defaultValue;
+function mapCustomer(row: any): Customer {
+  return {
+    id: String(row.id),
+    shop_id: String(row.shop_id),
+    name: String(row.name),
+    phoneNumber: String(row.phone_number),
+    purchaseCount: Number(row.purchase_count || 0),
+    totalSpent: Number(row.total_spent || 0),
+    notes: String(row.notes || ""),
+  };
 }
 
-function setLocalStorageItem<T>(key: string, value: T): void {
+function customerToRow(customer: Customer) {
+  return {
+    id: customer.id,
+    shop_id: customer.shop_id,
+    name: customer.name,
+    phone_number: customer.phoneNumber,
+    purchase_count: customer.purchaseCount,
+    total_spent: customer.totalSpent,
+    notes: customer.notes,
+  };
+}
+
+function mapStaff(row: any): Staff {
+  return {
+    id: String(row.id),
+    shop_id: String(row.shop_id || row.shopId || ""),
+    fullName: String(row.full_name || row.fullName || "Staff Member"),
+    phoneNumber: String(row.phone_number || row.phoneNumber || ""),
+    role: row.role ? String(row.role) : undefined,
+    status: row.status === "Suspended" ? "Suspended" : "Active",
+    permissions:
+      typeof row.permissions === "object" && row.permissions !== null
+        ? {
+            addProduct: !!row.permissions.addProduct,
+            editProduct: !!row.permissions.editProduct,
+            sellProduct: !!row.permissions.sellProduct,
+            registerCustomer: !!row.permissions.registerCustomer,
+            receiveRepairs: !!row.permissions.receiveRepairs,
+            updateRepairStatus: !!row.permissions.updateRepairStatus,
+            viewInventory: !!row.permissions.viewInventory,
+            checkPrices: !!row.permissions.checkPrices,
+            viewProductDetails: !!row.permissions.viewProductDetails,
+            deleteProduct: !!row.permissions.deleteProduct,
+          }
+        : {
+            addProduct: true,
+            editProduct: false,
+            sellProduct: true,
+            registerCustomer: true,
+            receiveRepairs: true,
+            updateRepairStatus: true,
+            viewInventory: true,
+            checkPrices: true,
+            viewProductDetails: true,
+            deleteProduct: false,
+          },
+    createdAt: row.created_at || row.createdAt || new Date().toISOString(),
+  };
+}
+
+function staffToRow(member: Staff) {
+  return {
+    id: member.id,
+    shop_id: member.shop_id,
+    full_name: member.fullName,
+    phone_number: member.phoneNumber,
+    role: member.role || "Sales Representative",
+    status: member.status,
+    permissions: member.permissions,
+    created_at: member.createdAt,
+  };
+}
+
+function mapNotification(row: any): AppNotification {
+  return {
+    id: String(row.id),
+    shop_id: String(row.shop_id),
+    title: String(row.title),
+    message: String(row.message),
+    type: row.type || "info",
+    read: !!row.read,
+    createdAt: row.created_at || new Date().toISOString(),
+  };
+}
+
+function mapAuditLog(row: any): AuditLog {
+  return {
+    id: String(row.id),
+    shop_id: String(row.shop_id),
+    userId: String(row.user_id || "Owner"),
+    userName: String(row.user_name || "Owner"),
+    action: String(row.action),
+    details: String(row.details || ""),
+    createdAt: row.created_at || new Date().toISOString(),
+  };
+}
+
+// ----------------------------------------------------
+// DATA LOADING: fetch all data for the active shop from Supabase
+// ----------------------------------------------------
+export async function loadShopData(shopId: string): Promise<void> {
+  if (!supabase) return;
+  currentShopId = shopId;
+
   try {
-    localStorage.setItem(key, JSON.stringify(value));
+    const [shopsRes, productsRes, salesRes, customersRes, staffRes, notifRes, auditRes] =
+      await Promise.all([
+        supabase.from("shops").select("*"),
+        supabase.from("products").select("*").eq("shop_id", shopId),
+        supabase.from("sales").select("*").eq("shop_id", shopId).order("created_at", { ascending: false }),
+        supabase.from("customers").select("*").eq("shop_id", shopId),
+        supabase.from("staff").select("*").eq("shop_id", shopId),
+        supabase.from("notifications").select("*").eq("shop_id", shopId).order("created_at", { ascending: false }),
+        supabase.from("audit_logs").select("*").eq("shop_id", shopId).order("created_at", { ascending: false }),
+      ]);
+
+    cache.shops = (shopsRes.data || []).map(mapShop);
+    cache.products = (productsRes.data || []).map(mapProduct);
+    cache.sales = (salesRes.data || []).map(mapSale);
+    cache.customers = (customersRes.data || []).map(mapCustomer);
+    cache.staff = (staffRes.data || []).map(mapStaff);
+    cache.notifications = (notifRes.data || []).map(mapNotification);
+    cache.auditLogs = (auditRes.data || []).map(mapAuditLog);
+
+    isInitialized = true;
     notifyListeners();
-  } catch (e: any) {
-    console.error("LocalStorage write error", e);
-    if (e.name === "QuotaExceededError" || e.name === "NS_ERROR_DOM_QUOTA_REACHED" || e.code === 22) {
-      // Storage is full! Let's auto-prune some non-critical data
-      try {
-        // Prune notifications to last 5 items
-        const notifications = getLocalStorageItem<any[]>("restockr_notifications", []);
-        if (notifications.length > 5) {
-          localStorage.setItem("restockr_notifications", JSON.stringify(notifications.slice(0, 5)));
-        }
-        // Prune audit logs to last 5 items
-        const logs = getLocalStorageItem<any[]>("restockr_audit_logs", []);
-        if (logs.length > 5) {
-          localStorage.setItem("restockr_audit_logs", JSON.stringify(logs.slice(0, 5)));
-        }
-        // Try setting the item again
-        localStorage.setItem(key, JSON.stringify(value));
-        notifyListeners();
-      } catch (retryError) {
-        console.error("Failed to recover from storage quota limit", retryError);
-        alert("⚠️ Storage quota exceeded! Please delete some items or remove products with large photos to free up space.");
-      }
-    }
+  } catch (err) {
+    console.error("[Database] Failed to load shop data from Supabase:", err);
   }
 }
 
-// Global state hooks
-export const db = {
-  getShops: (): Shop[] => {
-    return getLocalStorageItem("restockr_shops", INITIAL_SHOPS);
-  },
+// ----------------------------------------------------
+// REALTIME SUBSCRIPTIONS
+// Subscribes to all tenant tables and refreshes cache on change.
+// This keeps multiple browser sessions in sync without refreshes.
+// ----------------------------------------------------
+let realtimeChannel: any = null;
 
-  getShopBySlug: (slug: string): Shop | undefined => {
-    const shops = db.getShops();
-    return shops.find(s => s.slug.toLowerCase() === slug.toLowerCase());
-  },
+export function subscribeToRealtime(shopId: string): void {
+  if (!supabase || realtimeChannel) return;
 
-  getShopById: (id: string): Shop | undefined => {
-    const shops = db.getShops();
-    return shops.find(s => s.id === id);
-  },
+  realtimeChannel = supabase
+    .channel("restockr-realtime")
+    .on("postgres_changes", { event: "*", schema: "public", table: "products" }, (payload: any) => {
+      handleRealtimeChange("products", payload);
+    })
+    .on("postgres_changes", { event: "*", schema: "public", table: "sales" }, (payload: any) => {
+      handleRealtimeChange("sales", payload);
+    })
+    .on("postgres_changes", { event: "*", schema: "public", table: "customers" }, (payload: any) => {
+      handleRealtimeChange("customers", payload);
+    })
+    .on("postgres_changes", { event: "*", schema: "public", table: "staff" }, (payload: any) => {
+      handleRealtimeChange("staff", payload);
+    })
+    .on("postgres_changes", { event: "*", schema: "public", table: "notifications" }, (payload: any) => {
+      handleRealtimeChange("notifications", payload);
+    })
+    .on("postgres_changes", { event: "*", schema: "public", table: "audit_logs" }, (payload: any) => {
+      handleRealtimeChange("audit_logs", payload);
+    })
+    .subscribe();
+}
 
-  saveShop: (shop: Shop): void => {
-    const shops = db.getShops();
-    const index = shops.findIndex(s => s.id === shop.id);
-    if (index >= 0) {
-      shops[index] = shop;
-    } else {
-      shops.push(shop);
+export function unsubscribeFromRealtime(): void {
+  if (realtimeChannel && supabase) {
+    supabase.removeChannel(realtimeChannel);
+    realtimeChannel = null;
+  }
+}
+
+function handleRealtimeChange(table: string, payload: any): void {
+  const eventType = payload.eventType;
+  const newRow = payload.new;
+  const oldRow = payload.old;
+
+  if (eventType === "INSERT" && newRow) {
+    if (table === "products" && (!currentShopId || newRow.shop_id === currentShopId)) {
+      cache.products = [mapProduct(newRow), ...cache.products];
+    } else if (table === "sales" && (!currentShopId || newRow.shop_id === currentShopId)) {
+      cache.sales = [mapSale(newRow), ...cache.sales];
+    } else if (table === "customers" && (!currentShopId || newRow.shop_id === currentShopId)) {
+      cache.customers = [mapCustomer(newRow), ...cache.customers];
+    } else if (table === "staff" && (!currentShopId || newRow.shop_id === currentShopId)) {
+      cache.staff = [mapStaff(newRow), ...cache.staff];
+    } else if (table === "notifications" && (!currentShopId || newRow.shop_id === currentShopId)) {
+      cache.notifications = [mapNotification(newRow), ...cache.notifications];
+    } else if (table === "audit_logs" && (!currentShopId || newRow.shop_id === currentShopId)) {
+      cache.auditLogs = [mapAuditLog(newRow), ...cache.auditLogs];
     }
-    setLocalStorageItem("restockr_shops", shops);
+  } else if (eventType === "UPDATE" && newRow) {
+    if (table === "products") {
+      cache.products = cache.products.map((p) => (p.id === newRow.id ? mapProduct(newRow) : p));
+    } else if (table === "sales") {
+      cache.sales = cache.sales.map((s) => (s.id === newRow.id ? mapSale(newRow) : s));
+    } else if (table === "customers") {
+      cache.customers = cache.customers.map((c) => (c.id === newRow.id ? mapCustomer(newRow) : c));
+    } else if (table === "staff") {
+      cache.staff = cache.staff.map((s) => (s.id === newRow.id ? mapStaff(newRow) : s));
+    } else if (table === "notifications") {
+      cache.notifications = cache.notifications.map((n) => (n.id === newRow.id ? mapNotification(newRow) : n));
+    } else if (table === "shops") {
+      cache.shops = cache.shops.map((s) => (s.id === newRow.id ? mapShop(newRow) : s));
+    }
+  } else if (eventType === "DELETE" && oldRow) {
+    if (table === "products") {
+      cache.products = cache.products.filter((p) => p.id !== oldRow.id);
+    } else if (table === "sales") {
+      cache.sales = cache.sales.filter((s) => s.id !== oldRow.id);
+    } else if (table === "customers") {
+      cache.customers = cache.customers.filter((c) => c.id !== oldRow.id);
+    } else if (table === "staff") {
+      cache.staff = cache.staff.filter((s) => s.id !== oldRow.id);
+    } else if (table === "notifications") {
+      cache.notifications = cache.notifications.filter((n) => n.id !== oldRow.id);
+    } else if (table === "audit_logs") {
+      cache.auditLogs = cache.auditLogs.filter((l) => l.id !== oldRow.id);
+    }
+  }
+
+  notifyListeners();
+}
+
+// ----------------------------------------------------
+// AUTH: Shop Username login backed by Supabase Auth
+// Uses synthetic email: <username>@restockr.app
+// Preserves the existing "Shop Username + Password" UX
+// ----------------------------------------------------
+export async function signInWithShopCredentials(
+  username: string,
+  password: string
+): Promise<{ success: boolean; shop: Shop | null; error: string }> {
+  if (!supabase) return { success: false, shop: null, error: "Database not configured." };
+
+  const email = `${username.trim().toLowerCase()}@restockr.app`;
+
+  try {
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) {
+      return { success: false, shop: null, error: error.message };
+    }
+
+    if (!data.user) {
+      return { success: false, shop: null, error: "Authentication failed." };
+    }
+
+    // Fetch the shop owned by this user
+    const { data: shopRow, error: shopErr } = await supabase
+      .from("shops")
+      .select("*")
+      .eq("owner_user_id", data.user.id)
+      .maybeSingle();
+
+    if (shopErr || !shopRow) {
+      return { success: false, shop: null, error: "No registered shop found for this shop username." };
+    }
+
+    const shop = mapShop(shopRow);
+    return { success: true, shop, error: "" };
+  } catch (err: any) {
+    return { success: false, shop: null, error: err.message || "Login failed." };
+  }
+}
+
+export async function registerShopWithCredentials(params: {
+  shopName: string;
+  slug: string;
+  username: string;
+  password: string;
+  whatsappNumber: string;
+}): Promise<{ success: boolean; shop: Shop | null; error: string }> {
+  if (!supabase) return { success: false, shop: null, error: "Database not configured." };
+
+  const email = `${params.username.trim().toLowerCase()}@restockr.app`;
+
+  try {
+    // 1. Check slug uniqueness
+    const { data: existingSlug } = await supabase
+      .from("shops")
+      .select("id")
+      .eq("slug", params.slug.trim().toLowerCase())
+      .maybeSingle();
+
+    if (existingSlug) {
+      return { success: false, shop: null, error: "This store link / subdomain is already taken." };
+    }
+
+    // 2. Check username uniqueness (by checking if auth email already exists)
+    const { data: existingUser } = await supabase
+      .from("shops")
+      .select("id")
+      .eq("owner_username", params.username.trim().toLowerCase())
+      .maybeSingle();
+
+    if (existingUser) {
+      return { success: false, shop: null, error: "An account with this shop username already exists." };
+    }
+
+    // 3. Create auth user
+    const { data: authData, error: authErr } = await supabase.auth.signUp({ email, password: params.password });
+    if (authErr || !authData.user) {
+      return { success: false, shop: null, error: authErr?.message || "Failed to create account." };
+    }
+
+    const userId = authData.user.id;
+    const shopId = `shop-${Date.now()}`;
+    const newShop: Shop = {
+      id: shopId,
+      name: params.shopName.trim(),
+      slug: params.slug.trim().toLowerCase(),
+      ownerUsername: params.username.trim().toLowerCase(),
+      whatsappNumber: params.whatsappNumber.trim(),
+      subscriptionPlan: "Free Trial",
+      subscriptionStatus: "Active",
+      subscriptionExpiry: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
+      websiteSettings: {
+        showPrices: true,
+        showSoldProducts: true,
+        enableVideoDownloads: true,
+        enableImageDownloads: true,
+        customThemeColor: "#0F172A",
+      },
+      createdAt: new Date().toISOString(),
+    };
+
+    // 4. Insert shop with owner_user_id
+    const { error: shopInsertErr } = await supabase.from("shops").insert({
+      ...shopToRow(newShop),
+      owner_user_id: userId,
+    });
+
+    if (shopInsertErr) {
+      return { success: false, shop: null, error: shopInsertErr.message };
+    }
+
+    // 5. Add audit log + notification
+    await supabase.from("audit_logs").insert({
+      id: `log-${Date.now()}`,
+      shop_id: shopId,
+      user_id: "Owner",
+      user_name: "Owner",
+      action: "Shop Setup",
+      details: `Restockr account for ${newShop.name} was successfully registered and initialized.`,
+    });
+
+    await supabase.from("notifications").insert({
+      id: `notif-${Date.now()}`,
+      shop_id: shopId,
+      title: "Welcome to Restockr",
+      message: `Welcome to Restockr, ${newShop.name}! Your workspace is active and ready for devices.`,
+      type: "success",
+      read: false,
+    });
+
+    return { success: true, shop: newShop, error: "" };
+  } catch (err: any) {
+    return { success: false, shop: null, error: err.message || "Registration failed." };
+  }
+}
+
+export async function signOutFromSupabase(): Promise<void> {
+  if (supabase) {
+    await supabase.auth.signOut();
+  }
+}
+
+export async function restoreSession(): Promise<{ shop: Shop | null }> {
+  if (!supabase) return { shop: null };
+
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session || !session.user) return { shop: null };
+
+    const { data: shopRow } = await supabase
+      .from("shops")
+      .select("*")
+      .eq("owner_user_id", session.user.id)
+      .maybeSingle();
+
+    if (!shopRow) return { shop: null };
+    return { shop: mapShop(shopRow) };
+  } catch {
+    return { shop: null };
+  }
+}
+
+// ----------------------------------------------------
+// SYNC HELPERS (kept for backward compat with App.tsx)
+// ----------------------------------------------------
+export async function syncStaffWithSupabase(shopId: string): Promise<Staff[]> {
+  await loadShopData(shopId);
+  return cache.staff.filter((s) => s.shop_id === shopId);
+}
+
+// ----------------------------------------------------
+// PUBLIC DB API (synchronous reads from cache, async writes to Supabase)
+// ----------------------------------------------------
+export const db = {
+  // ---- SHOPS ----
+  getShops: (): Shop[] => cache.shops,
+
+  getShopBySlug: (slug: string): Shop | undefined =>
+    cache.shops.find((s) => s.slug.toLowerCase() === slug.toLowerCase()),
+
+  getShopById: (id: string): Shop | undefined =>
+    cache.shops.find((s) => s.id === id),
+
+  saveShop: async (shop: Shop): Promise<void> => {
+    if (!supabase) return;
+    const { data: { session } } = await supabase.auth.getSession();
+    const ownerUserId = session?.user?.id;
+
+    const { error } = await supabase.from("shops").upsert({
+      ...shopToRow(shop),
+      owner_user_id: ownerUserId,
+    }, { onConflict: "id" });
+
+    if (error) {
+      console.error("[Database] Failed to save shop:", error.message);
+      return;
+    }
+
+    // Update cache
+    const idx = cache.shops.findIndex((s) => s.id === shop.id);
+    if (idx >= 0) {
+      cache.shops[idx] = shop;
+    } else {
+      cache.shops.push(shop);
+    }
+    notifyListeners();
   },
+
+  updateShopSettings: async (shopId: string, settings: Shop["websiteSettings"]): Promise<void> => {
+    if (!supabase) return;
+    const { error } = await supabase
+      .from("shops")
+      .update({ website_settings: settings })
+      .eq("id", shopId);
+
+    if (error) {
+      console.error("[Database] Failed to update shop settings:", error.message);
+      return;
+    }
+
+    const idx = cache.shops.findIndex((s) => s.id === shopId);
+    if (idx >= 0) {
+      cache.shops[idx] = { ...cache.shops[idx], websiteSettings: settings };
+    }
+    await db.addAuditLog(shopId, "Owner", "Owner", "Website Settings Updated", "Updated custom reseller website preferences.");
+    notifyListeners();
+  },
+
+  updateShopProfile: async (shopId: string, profile: {
+    name: string;
+    businessAddress?: string;
+    businessPhone?: string;
+    logoUrl?: string;
+    whatsappNumber: string;
+  }): Promise<void> => {
+    if (!supabase) return;
+    const { error } = await supabase
+      .from("shops")
+      .update({
+        name: profile.name,
+        business_address: profile.businessAddress || null,
+        business_phone: profile.businessPhone || null,
+        logo_url: profile.logoUrl || null,
+        whatsapp_number: profile.whatsappNumber,
+      })
+      .eq("id", shopId);
+
+    if (error) {
+      console.error("[Database] Failed to update shop profile:", error.message);
+      return;
+    }
+
+    const idx = cache.shops.findIndex((s) => s.id === shopId);
+    if (idx >= 0) {
+      cache.shops[idx] = {
+        ...cache.shops[idx],
+        name: profile.name,
+        businessAddress: profile.businessAddress,
+        businessPhone: profile.businessPhone,
+        logoUrl: profile.logoUrl,
+        whatsappNumber: profile.whatsappNumber,
+      };
+    }
+    await db.addAuditLog(shopId, "Owner", "Owner", "Business Profile Updated", `Updated business profile details for ${profile.name}.`);
+    notifyListeners();
+  },
+
+  // ---- PRODUCTS ----
+  getProducts: (shopId: string): Product[] =>
+    cache.products.filter((p) => p.shop_id === shopId),
+
+  getProductById: (id: string): Product | undefined =>
+    cache.products.find((p) => p.id === id),
 
   getResolvedVideoUrl: (product: Product): string => {
-    if (!product.productVideo) return "";
-    if (product.productVideo.startsWith("db:")) {
-      const cached = mediaVideosCache[`video-${product.id}`];
-      if (cached) return cached;
-    }
-    return product.productVideo;
+    return product.productVideo || "";
   },
 
-  getProducts: (shopId: string): Product[] => {
-    const products = getLocalStorageItem<Product[]>("restockr_products", INITIAL_PRODUCTS);
-    return products.filter(p => p.shop_id === shopId).map(p => {
-      const cloned = { ...p };
-      if (cloned.productImages && cloned.productImages[0]?.startsWith("db:")) {
-        const cachedImgs = mediaImagesCache[`images-${cloned.id}`];
-        if (cachedImgs && cachedImgs.length > 0) {
-          cloned.productImages = cachedImgs;
-        }
-      }
-      if (cloned.productVideo?.startsWith("db:")) {
-        const cachedVid = mediaVideosCache[`video-${cloned.id}`];
-        if (cachedVid) {
-          cloned.productVideo = cachedVid;
-        }
-      }
-      return cloned;
-    });
-  },
+  saveProduct: async (product: Product, performer: string = "Owner"): Promise<void> => {
+    if (!supabase) return;
 
-  getProductById: (id: string): Product | undefined => {
-    const products = getLocalStorageItem<Product[]>("restockr_products", INITIAL_PRODUCTS);
-    const p = products.find(p => p.id === id);
-    if (!p) return undefined;
-    const cloned = { ...p };
-    if (cloned.productImages && cloned.productImages[0]?.startsWith("db:")) {
-      const cachedImgs = mediaImagesCache[`images-${cloned.id}`];
-      if (cachedImgs && cachedImgs.length > 0) {
-        cloned.productImages = cachedImgs;
-      }
-    }
-    if (cloned.productVideo?.startsWith("db:")) {
-      const cachedVid = mediaVideosCache[`video-${cloned.id}`];
-      if (cachedVid) {
-        cloned.productVideo = cachedVid;
-      }
-    }
-    return cloned;
-  },
-
-  saveProduct: (product: Product, performer: string = "Owner"): void => {
-    const products = getLocalStorageItem<Product[]>("restockr_products", INITIAL_PRODUCTS);
-    const index = products.findIndex(p => p.id === product.id);
-    const oldProduct = index >= 0 ? products[index] : null;
-
-    // Detect video removal or replacement
-    if (oldProduct && oldProduct.productVideo && oldProduct.productVideo !== product.productVideo) {
-      if (oldProduct.productVideo.includes("supabase.co")) {
-        deleteFileFromSupabase(oldProduct.productVideo).catch(err => {
-          console.warn("[Database] Supabase video deletion failed:", err);
-        });
-      }
-      deleteMediaFromIndexedDB(`video-${product.id}`);
-    }
-
-    // Process product video URL
-    if (product.productVideo && product.productVideo.startsWith("data:")) {
-      saveMediaToIndexedDB("videos", `video-${product.id}`, product.productVideo);
-      product.productVideo = `db:${product.id}`;
-    } else if (!product.productVideo || product.productVideo.trim() === "") {
-      product.productVideo = undefined;
-      deleteMediaFromIndexedDB(`video-${product.id}`);
-    }
-
+    // Clean up blob: URLs in images
     if (product.productImages && product.productImages.length > 0) {
-      product.productImages = product.productImages.map(img =>
-        img.startsWith("blob:") ? "https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?auto=format&fit=crop&q=80&w=600" : img
+      product.productImages = product.productImages.map((img) =>
+        img.startsWith("blob:")
+          ? "https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?auto=format&fit=crop&q=80&w=600"
+          : img
       );
     }
-    
-    // Extract heavy base64 data URLs to IndexedDB / memory cache for images
-    const productId = product.id;
-    if (product.productImages && product.productImages.length > 0) {
-      const firstImg = product.productImages[0];
-      if (firstImg?.startsWith("data:")) {
-        saveMediaToIndexedDB("images", `images-${productId}`, product.productImages);
-        product.productImages = [`db:${productId}`];
-      }
+
+    const { error } = await supabase
+      .from("products")
+      .upsert(productToRow(product), { onConflict: "id" });
+
+    if (error) {
+      console.error("[Database] Failed to save product:", error.message);
+      return;
     }
 
-    const isEdit = index >= 0;
+    const idx = cache.products.findIndex((p) => p.id === product.id);
+    const isEdit = idx >= 0;
     if (isEdit) {
-      products[index] = product;
+      cache.products[idx] = product;
     } else {
-      products.unshift(product); // Add to top
+      cache.products = [product, ...cache.products];
     }
-    setLocalStorageItem("restockr_products", products);
 
-    // If performer is not "Owner", generate notification to owner
     if (performer !== "Owner") {
-      db.addNotification(
+      await db.addNotification(
         product.shop_id,
         isEdit ? "Staff Edited Product" : "Staff Added Product",
         `Staff member ${performer} ${isEdit ? "edited" : "added"} product: ${product.brand} ${product.model} (${product.storage})`,
@@ -321,72 +726,99 @@ export const db = {
     notifyListeners();
   },
 
-  deleteProduct: (shopId: string, id: string): void => {
-    const products = getLocalStorageItem<Product[]>("restockr_products", INITIAL_PRODUCTS);
-    const target = products.find(p => p.id === id && p.shop_id === shopId);
-    if (target && target.productVideo) {
-      if (target.productVideo.includes("supabase.co")) {
-        deleteFileFromSupabase(target.productVideo).catch(err => {
-          console.warn("[Database] Supabase video deletion failed:", err);
-        });
-      }
+  deleteProduct: async (shopId: string, id: string): Promise<void> => {
+    if (!supabase) return;
+
+    const target = cache.products.find((p) => p.id === id && p.shop_id === shopId);
+    if (target && target.productVideo && target.productVideo.includes("supabase.co")) {
+      deleteFileFromSupabase(target.productVideo).catch((err) =>
+        console.warn("[Database] Supabase video deletion failed:", err)
+      );
     }
-    const filtered = products.filter(p => !(p.id === id && p.shop_id === shopId));
-    setLocalStorageItem("restockr_products", filtered);
-    deleteMediaFromIndexedDB(`images-${id}`);
-    deleteMediaFromIndexedDB(`video-${id}`);
+
+    const { error } = await supabase.from("products").delete().eq("id", id).eq("shop_id", shopId);
+    if (error) {
+      console.error("[Database] Failed to delete product:", error.message);
+      return;
+    }
+
+    cache.products = cache.products.filter((p) => p.id !== id);
     notifyListeners();
   },
 
-  getSales: (shopId: string): Sale[] => {
-    const sales = getLocalStorageItem<Sale[]>("restockr_sales", INITIAL_SALES);
-    return sales.filter(s => s.shop_id === shopId);
-  },
+  // ---- SALES ----
+  getSales: (shopId: string): Sale[] =>
+    cache.sales.filter((s) => s.shop_id === shopId),
 
-  saveSale: (sale: Sale): void => {
-    // 1. Add Sale
-    const sales = getLocalStorageItem<Sale[]>("restockr_sales", INITIAL_SALES);
+  saveSale: async (sale: Sale): Promise<void> => {
+    if (!supabase) return;
+
     const saleWithStatus = { ...sale, status: "Completed" as const };
-    sales.unshift(saleWithStatus);
-    setLocalStorageItem("restockr_sales", sales);
 
-    // 2. Adjust product inventory quantity
-    const products = getLocalStorageItem<Product[]>("restockr_products", INITIAL_PRODUCTS);
-    const prodIndex = products.findIndex(p => p.id === sale.productId);
-    if (prodIndex >= 0) {
-      products[prodIndex].quantity = 0;
-      products[prodIndex].status = "SOLD";
-      products[prodIndex].sold_at = sale.createdAt || new Date().toISOString();
-      setLocalStorageItem("restockr_products", products);
+    const { error } = await supabase
+      .from("sales")
+      .insert(saleToRow(saleWithStatus));
+
+    if (error) {
+      console.error("[Database] Failed to save sale:", error.message);
+      return;
     }
 
-    // 3. Update or create customer profile
-    const customers = getLocalStorageItem<Customer[]>("restockr_customers", INITIAL_CUSTOMERS);
-    const custIndex = customers.findIndex(
-      c => c.phoneNumber.replace(/\s+/g, "") === sale.customerPhone.replace(/\s+/g, "") && c.shop_id === sale.shop_id
+    cache.sales = [saleWithStatus, ...cache.sales];
+
+    // Update product inventory
+    const prodIdx = cache.products.findIndex((p) => p.id === sale.productId);
+    if (prodIdx >= 0) {
+      const updatedProduct = {
+        ...cache.products[prodIdx],
+        quantity: 0,
+        status: "SOLD" as const,
+        sold_at: sale.createdAt || new Date().toISOString(),
+      };
+      cache.products[prodIdx] = updatedProduct;
+      await supabase
+        .from("products")
+        .update({ quantity: 0, status: "SOLD", sold_at: updatedProduct.sold_at })
+        .eq("id", sale.productId);
+    }
+
+    // Update or create customer
+    const normalizedPhone = sale.customerPhone.replace(/\s+/g, "");
+    const custIdx = cache.customers.findIndex(
+      (c) => c.phoneNumber.replace(/\s+/g, "") === normalizedPhone && c.shop_id === sale.shop_id
     );
 
-    if (custIndex >= 0) {
-      customers[custIndex].purchaseCount += 1;
-      customers[custIndex].totalSpent += sale.totalAmount;
-      if (!customers[custIndex].notes.includes(sale.productName)) {
-        customers[custIndex].notes += ` | Bought ${sale.productName}`;
-      }
+    if (custIdx >= 0) {
+      const updatedCustomer = {
+        ...cache.customers[custIdx],
+        purchaseCount: cache.customers[custIdx].purchaseCount + 1,
+        totalSpent: cache.customers[custIdx].totalSpent + sale.totalAmount,
+        notes: cache.customers[custIdx].notes.includes(sale.productName)
+          ? cache.customers[custIdx].notes
+          : `${cache.customers[custIdx].notes} | Bought ${sale.productName}`,
+      };
+      cache.customers[custIdx] = updatedCustomer;
+      await supabase.from("customers").update({
+        purchase_count: updatedCustomer.purchaseCount,
+        total_spent: updatedCustomer.totalSpent,
+        notes: updatedCustomer.notes,
+      }).eq("id", updatedCustomer.id);
     } else if (sale.customerName) {
-      customers.push({
+      const newCustomer: Customer = {
         id: `cust-${Date.now()}`,
         shop_id: sale.shop_id,
         name: sale.customerName,
         phoneNumber: sale.customerPhone,
         purchaseCount: 1,
         totalSpent: sale.totalAmount,
-        notes: `Bought ${sale.productName}`
-      });
+        notes: `Bought ${sale.productName}`,
+      };
+      cache.customers = [...cache.customers, newCustomer];
+      await supabase.from("customers").insert(customerToRow(newCustomer));
     }
-    setLocalStorageItem("restockr_customers", customers);
 
-    // 4. Log Audit Trail
-    db.addAuditLog(
+    // Audit log + notification
+    await db.addAuditLog(
       sale.shop_id,
       sale.soldBy,
       sale.soldByPhone || "Owner",
@@ -394,8 +826,7 @@ export const db = {
       `Completed sale for ${sale.quantity}x ${sale.productName} (₦${sale.totalAmount.toLocaleString()}) to ${sale.customerName || "Walk-in Customer"}`
     );
 
-    // 5. Create alert
-    db.addNotification(
+    await db.addNotification(
       sale.shop_id,
       "Sale Completed",
       `${sale.soldBy} sold ${sale.productName} for ₦${sale.totalAmount.toLocaleString()}`,
@@ -403,71 +834,83 @@ export const db = {
     );
 
     if (sale.soldBy !== "Owner") {
-      db.addNotification(
+      await db.addNotification(
         sale.shop_id,
         "Staff Logged Sale",
         `Staff member ${sale.soldBy} recorded a sale of ${sale.quantity}x ${sale.productName} for ₦${sale.totalAmount.toLocaleString()}`,
         "info"
       );
     }
+
     notifyListeners();
   },
 
-  undoSale: (shopId: string, saleId: string, performedBy: string): { success: boolean; message: string } => {
+  undoSale: async (shopId: string, saleId: string, performedBy: string): Promise<{ success: boolean; message: string }> => {
+    if (!supabase) return { success: false, message: "Database not configured." };
+
     try {
-      const sales = getLocalStorageItem<Sale[]>("restockr_sales", INITIAL_SALES);
-      const saleIndex = sales.findIndex(s => s.id === saleId && s.shop_id === shopId);
-      if (saleIndex < 0) {
+      const sale = cache.sales.find((s) => s.id === saleId && s.shop_id === shopId);
+      if (!sale) {
         return { success: false, message: "Sale transaction record not found." };
       }
-
-      const sale = sales[saleIndex];
 
       if (sale.status === "Reversed") {
         return { success: false, message: "Transaction already reversed previously." };
       }
 
-      // Enforce role restriction: Only Owner can reverse
       if (performedBy !== "Owner") {
         return { success: false, message: "Access Denied: Only the store Owner is authorized to reverse sales transactions." };
       }
 
-      // Enforce 30-day restriction
       const saleDate = new Date(sale.createdAt);
       const now = new Date();
-      const diffTime = Math.abs(now.getTime() - saleDate.getTime());
-      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      const diffDays = Math.ceil(Math.abs(now.getTime() - saleDate.getTime()) / (1000 * 60 * 60 * 24));
       if (diffDays > 30) {
         return { success: false, message: "Time-limit Exceeded: This sale is over 30 days old and cannot be reversed." };
       }
 
-      // 1. Restore product quantity and status
-      const products = getLocalStorageItem<Product[]>("restockr_products", INITIAL_PRODUCTS);
-      const prodIndex = products.findIndex(p => p.id === sale.productId);
-      if (prodIndex >= 0) {
-        products[prodIndex].quantity = (products[prodIndex].quantity || 0) + (sale.quantity || 1);
-        products[prodIndex].status = "Available"; // restore status
-        delete products[prodIndex].sold_at;
-        setLocalStorageItem("restockr_products", products);
+      // Restore product
+      const prodIdx = cache.products.findIndex((p) => p.id === sale.productId);
+      if (prodIdx >= 0) {
+        const restoredProduct = {
+          ...cache.products[prodIdx],
+          quantity: (cache.products[prodIdx].quantity || 0) + (sale.quantity || 1),
+          status: "Available" as const,
+        };
+        const { sold_at, ...productWithoutSoldAt } = restoredProduct;
+        cache.products[prodIdx] = productWithoutSoldAt as Product;
+        await supabase
+          .from("products")
+          .update({ quantity: productWithoutSoldAt.quantity, status: "Available", sold_at: null })
+          .eq("id", sale.productId);
       }
 
-      // 2. Deduct from customer metrics
-      const customers = getLocalStorageItem<Customer[]>("restockr_customers", INITIAL_CUSTOMERS);
-      const custIndex = customers.findIndex(
-        c => c.phoneNumber && sale.customerPhone && c.phoneNumber.replace(/\s+/g, "") === sale.customerPhone.replace(/\s+/g, "") && c.shop_id === shopId
+      // Deduct from customer
+      const custIdx = cache.customers.findIndex(
+        (c) => c.phoneNumber && sale.customerPhone && c.phoneNumber.replace(/\s+/g, "") === sale.customerPhone.replace(/\s+/g, "") && c.shop_id === shopId
       );
-      if (custIndex >= 0) {
-        customers[custIndex].purchaseCount = Math.max(0, customers[custIndex].purchaseCount - 1);
-        customers[custIndex].totalSpent = Math.max(0, customers[custIndex].totalSpent - sale.totalAmount);
-        setLocalStorageItem("restockr_customers", customers);
+      if (custIdx >= 0) {
+        const updatedCustomer = {
+          ...cache.customers[custIdx],
+          purchaseCount: Math.max(0, cache.customers[custIdx].purchaseCount - 1),
+          totalSpent: Math.max(0, cache.customers[custIdx].totalSpent - sale.totalAmount),
+        };
+        cache.customers[custIdx] = updatedCustomer;
+        await supabase.from("customers").update({
+          purchase_count: updatedCustomer.purchaseCount,
+          total_spent: updatedCustomer.totalSpent,
+        }).eq("id", updatedCustomer.id);
       }
 
-      // 3. Mark the receipt as Reversed (never delete)
-      sales[saleIndex].status = "Reversed";
-      setLocalStorageItem("restockr_sales", sales);
+      // Mark sale as reversed
+      const reversedSale = { ...sale, status: "Reversed" as const };
+      const saleIdx = cache.sales.findIndex((s) => s.id === saleId);
+      if (saleIdx >= 0) {
+        cache.sales[saleIdx] = reversedSale;
+      }
+      await supabase.from("sales").update({ status: "Reversed" }).eq("id", saleId);
 
-      // 4. Audit Log & Notification
-      db.addAuditLog(
+      await db.addAuditLog(
         shopId,
         performedBy,
         "System",
@@ -475,7 +918,7 @@ export const db = {
         `Reversed sale receipt #${sale.id.slice(0, 8)} of ${sale.productName} (₦${sale.totalAmount.toLocaleString()}). Stock quantity restored.`
       );
 
-      db.addNotification(
+      await db.addNotification(
         shopId,
         "Sale Reversed",
         `Sale receipt #${sale.id.slice(0, 8)} (${sale.productName}) was reversed by ${performedBy}. Stock restored to live inventory.`,
@@ -483,7 +926,6 @@ export const db = {
       );
 
       notifyListeners();
-
       return { success: true, message: "Sale transaction successfully reversed and stock restored." };
     } catch (err: any) {
       console.error("Error performing sale reversal:", err);
@@ -491,38 +933,55 @@ export const db = {
     }
   },
 
-  getCustomers: (shopId: string): Customer[] => {
-    const customers = getLocalStorageItem<Customer[]>("restockr_customers", INITIAL_CUSTOMERS);
-    return customers.filter(c => c.shop_id === shopId);
-  },
+  // ---- CUSTOMERS ----
+  getCustomers: (shopId: string): Customer[] =>
+    cache.customers.filter((c) => c.shop_id === shopId),
 
-  saveCustomer: (customer: Customer): void => {
-    const customers = getLocalStorageItem<Customer[]>("restockr_customers", INITIAL_CUSTOMERS);
-    const index = customers.findIndex(c => c.id === customer.id);
-    if (index >= 0) {
-      customers[index] = customer;
-    } else {
-      customers.push(customer);
+  saveCustomer: async (customer: Customer): Promise<void> => {
+    if (!supabase) return;
+
+    const { error } = await supabase
+      .from("customers")
+      .upsert(customerToRow(customer), { onConflict: "id" });
+
+    if (error) {
+      console.error("[Database] Failed to save customer:", error.message);
+      return;
     }
-    setLocalStorageItem("restockr_customers", customers);
-  },
 
-  getStaff: (shopId: string): Staff[] => {
-    const staff = getLocalStorageItem<Staff[]>("restockr_staff", INITIAL_STAFF);
-    return staff.filter(s => s.shop_id === shopId);
-  },
-
-  saveStaff: (member: Staff): void => {
-    const staff = getLocalStorageItem<Staff[]>("restockr_staff", INITIAL_STAFF);
-    const index = staff.findIndex(s => s.id === member.id);
-    if (index >= 0) {
-      staff[index] = member;
+    const idx = cache.customers.findIndex((c) => c.id === customer.id);
+    if (idx >= 0) {
+      cache.customers[idx] = customer;
     } else {
-      staff.push(member);
+      cache.customers.push(customer);
     }
-    setLocalStorageItem("restockr_staff", staff);
+    notifyListeners();
+  },
 
-    db.addAuditLog(
+  // ---- STAFF ----
+  getStaff: (shopId: string): Staff[] =>
+    cache.staff.filter((s) => s.shop_id === shopId),
+
+  saveStaff: async (member: Staff): Promise<void> => {
+    if (!supabase) return;
+
+    const { error } = await supabase
+      .from("staff")
+      .upsert(staffToRow(member), { onConflict: "id" });
+
+    if (error) {
+      console.error("[Database] Failed to save staff:", error.message);
+      return;
+    }
+
+    const idx = cache.staff.findIndex((s) => s.id === member.id);
+    if (idx >= 0) {
+      cache.staff[idx] = member;
+    } else {
+      cache.staff.push(member);
+    }
+
+    await db.addAuditLog(
       member.shop_id,
       "Owner",
       "Owner",
@@ -530,53 +989,23 @@ export const db = {
       `Staff member ${member.fullName} (${member.phoneNumber}) status updated to ${member.status}.`
     );
     notifyListeners();
-
-    // Persist immediately to live Supabase staff table
-    if (supabase) {
-      const payload = {
-        id: member.id,
-        shop_id: member.shop_id,
-        full_name: member.fullName,
-        phone_number: member.phoneNumber,
-        role: member.role || "Sales Representative",
-        status: member.status,
-        permissions: member.permissions,
-        created_at: member.createdAt
-      };
-
-      supabase
-        .from("staff")
-        .upsert(payload, { onConflict: "id" })
-        .then(({ error }) => {
-          if (error) {
-            console.warn("[Supabase Staff Primary Upsert Error]:", error.message);
-            // Fallback for tables configured with camelCase column names
-            const fallbackPayload = {
-              id: member.id,
-              shopId: member.shop_id,
-              fullName: member.fullName,
-              phoneNumber: member.phoneNumber,
-              role: member.role || "Sales Representative",
-              status: member.status,
-              permissions: member.permissions,
-              createdAt: member.createdAt
-            };
-            return supabase.from("staff").upsert(fallbackPayload, { onConflict: "id" });
-          }
-        }, err => {
-          console.warn("[Supabase Staff Upsert Exception]:", err);
-        });
-    }
   },
 
-  deleteStaff: (shopId: string, id: string): void => {
-    const staff = getLocalStorageItem<Staff[]>("restockr_staff", INITIAL_STAFF);
-    const member = staff.find(s => s.id === id);
-    const filtered = staff.filter(s => !(s.id === id && s.shop_id === shopId));
-    setLocalStorageItem("restockr_staff", filtered);
+  deleteStaff: async (shopId: string, id: string): Promise<void> => {
+    if (!supabase) return;
+
+    const member = cache.staff.find((s) => s.id === id);
+
+    const { error } = await supabase.from("staff").delete().eq("id", id).eq("shop_id", shopId);
+    if (error) {
+      console.error("[Database] Failed to delete staff:", error.message);
+      return;
+    }
+
+    cache.staff = cache.staff.filter((s) => s.id !== id);
 
     if (member) {
-      db.addAuditLog(
+      await db.addAuditLog(
         shopId,
         "Owner",
         "Owner",
@@ -585,209 +1014,100 @@ export const db = {
       );
     }
     notifyListeners();
-
-    if (supabase) {
-      supabase
-        .from("staff")
-        .delete()
-        .eq("id", id)
-        .then(({ error }) => {
-          if (error) {
-            console.warn("[Supabase Staff Delete Error]:", error.message);
-          }
-        }, err => {
-          console.warn("[Supabase Staff Delete Exception]:", err);
-        });
-    }
   },
 
-  getAuditLogs: (shopId: string): AuditLog[] => {
-    const logs = getLocalStorageItem<AuditLog[]>("restockr_audit_logs", INITIAL_AUDIT_LOGS);
-    return logs.filter(l => l.shop_id === shopId);
-  },
+  // ---- AUDIT LOGS ----
+  getAuditLogs: (shopId: string): AuditLog[] =>
+    cache.auditLogs.filter((l) => l.shop_id === shopId),
 
-  addAuditLog: (shopId: string, userName: string, userId: string, action: string, details: string): void => {
-    const logs = getLocalStorageItem<AuditLog[]>("restockr_audit_logs", INITIAL_AUDIT_LOGS);
-    logs.unshift({
-      id: `log-${Date.now()}`,
+  addAuditLog: async (shopId: string, userName: string, userId: string, action: string, details: string): Promise<void> => {
+    if (!supabase) return;
+
+    const log: AuditLog = {
+      id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       shop_id: shopId,
       userId,
       userName,
       action,
       details,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+    };
+
+    const { error } = await supabase.from("audit_logs").insert({
+      id: log.id,
+      shop_id: log.shop_id,
+      user_id: log.userId,
+      user_name: log.userName,
+      action: log.action,
+      details: log.details,
     });
-    setLocalStorageItem("restockr_audit_logs", logs);
+
+    if (error) {
+      console.error("[Database] Failed to insert audit log:", error.message);
+      return;
+    }
+
+    cache.auditLogs = [log, ...cache.auditLogs];
   },
 
-  getNotifications: (shopId: string): AppNotification[] => {
-    const notifications = getLocalStorageItem<AppNotification[]>("restockr_notifications", INITIAL_NOTIFICATIONS);
-    return notifications.filter(n => n.shop_id === shopId);
-  },
+  // ---- NOTIFICATIONS ----
+  getNotifications: (shopId: string): AppNotification[] =>
+    cache.notifications.filter((n) => n.shop_id === shopId),
 
-  addNotification: (shopId: string, title: string, message: string, type: "info" | "success" | "warning" | "error"): void => {
-    const notifications = getLocalStorageItem<AppNotification[]>("restockr_notifications", INITIAL_NOTIFICATIONS);
-    notifications.unshift({
-      id: `notif-${Date.now()}`,
+  addNotification: async (shopId: string, title: string, message: string, type: "info" | "success" | "warning" | "error"): Promise<void> => {
+    if (!supabase) return;
+
+    const notif: AppNotification = {
+      id: `notif-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       shop_id: shopId,
       title,
       message,
       type,
       read: false,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+    };
+
+    const { error } = await supabase.from("notifications").insert({
+      id: notif.id,
+      shop_id: notif.shop_id,
+      title: notif.title,
+      message: notif.message,
+      type: notif.type,
+      read: notif.read,
     });
-    setLocalStorageItem("restockr_notifications", notifications);
-  },
-
-  markNotificationsAsRead: (shopId: string): void => {
-    const notifications = getLocalStorageItem<AppNotification[]>("restockr_notifications", INITIAL_NOTIFICATIONS);
-    notifications.forEach(n => {
-      if (n.shop_id === shopId) {
-        n.read = true;
-      }
-    });
-    setLocalStorageItem("restockr_notifications", notifications);
-  },
-
-  updateShopSettings: (shopId: string, settings: Shop["websiteSettings"]): void => {
-    const shops = db.getShops();
-    const index = shops.findIndex(s => s.id === shopId);
-    if (index >= 0) {
-      shops[index].websiteSettings = settings;
-      setLocalStorageItem("restockr_shops", shops);
-
-      db.addAuditLog(
-        shopId,
-        "Owner",
-        "Owner",
-        "Website Settings Updated",
-        "Updated custom reseller website preferences (Theme colors, show/hide status, download permissions)."
-      );
-    }
-  },
-
-  updateShopProfile: (shopId: string, profile: { name: string; businessAddress?: string; businessPhone?: string; logoUrl?: string; whatsappNumber: string }): void => {
-    const shops = db.getShops();
-    const index = shops.findIndex(s => s.id === shopId);
-    if (index >= 0) {
-      shops[index].name = profile.name;
-      shops[index].businessAddress = profile.businessAddress;
-      shops[index].businessPhone = profile.businessPhone;
-      shops[index].logoUrl = profile.logoUrl;
-      shops[index].whatsappNumber = profile.whatsappNumber;
-      setLocalStorageItem("restockr_shops", shops);
-
-      db.addAuditLog(
-        shopId,
-        "Owner",
-        "Owner",
-        "Business Profile Updated",
-        `Updated business profile details for ${profile.name}.`
-      );
-    }
-  },
-
-  getPasswords: (): Record<string, string> => {
-    return getLocalStorageItem<Record<string, string>>("restockr_passwords", {});
-  },
-
-  savePassword: (username: string, password: string): void => {
-    const passwords = db.getPasswords();
-    passwords[username.toLowerCase().trim()] = password;
-    setLocalStorageItem("restockr_passwords", passwords);
-  }
-};
-
-// ----------------------------------------------------
-// SUPABASE REAL-TIME STAFF SYNCHRONIZATION HELPERS
-// ----------------------------------------------------
-export function mapSupabaseStaffToLocal(row: any): Staff {
-  return {
-    id: String(row.id),
-    shop_id: String(row.shop_id || row.shopId || ""),
-    fullName: String(row.full_name || row.fullName || row.fullname || "Staff Member"),
-    phoneNumber: String(row.phone_number || row.phoneNumber || row.phonenumber || ""),
-    role: row.role ? String(row.role) : undefined,
-    status: row.status === "Suspended" ? "Suspended" : "Active",
-    permissions: typeof row.permissions === "object" && row.permissions !== null
-      ? {
-          addProduct: !!row.permissions.addProduct,
-          editProduct: !!row.permissions.editProduct,
-          sellProduct: !!row.permissions.sellProduct,
-          registerCustomer: !!row.permissions.registerCustomer,
-          receiveRepairs: !!row.permissions.receiveRepairs,
-          updateRepairStatus: !!row.permissions.updateRepairStatus,
-          viewInventory: !!row.permissions.viewInventory,
-          checkPrices: !!row.permissions.checkPrices,
-          viewProductDetails: !!row.permissions.viewProductDetails,
-          deleteProduct: !!row.permissions.deleteProduct,
-        }
-      : {
-          addProduct: true,
-          editProduct: false,
-          sellProduct: true,
-          registerCustomer: true,
-          receiveRepairs: true,
-          updateRepairStatus: true,
-          viewInventory: true,
-          checkPrices: true,
-          viewProductDetails: true,
-          deleteProduct: false,
-        },
-    createdAt: row.created_at || row.createdAt || new Date().toISOString(),
-  };
-}
-
-export async function syncStaffWithSupabase(shopId: string): Promise<Staff[]> {
-  if (!supabase || !shopId) return db.getStaff(shopId);
-
-  try {
-    let { data, error } = await supabase
-      .from("staff")
-      .select("*")
-      .eq("shop_id", shopId);
 
     if (error) {
-      // Fallback try camelCase column if shop_id fails
-      const fallback = await supabase
-        .from("staff")
-        .select("*")
-        .eq("shopId", shopId);
-
-      data = fallback.data;
-      error = fallback.error;
+      console.error("[Database] Failed to insert notification:", error.message);
+      return;
     }
 
-    if (!error && data && data.length > 0) {
-      const mapped = data.map(mapSupabaseStaffToLocal);
-      const allStaff = getLocalStorageItem<Staff[]>("restockr_staff", INITIAL_STAFF);
-      const otherShopsStaff = allStaff.filter(s => s.shop_id !== shopId);
-      const updatedStaffList = [...otherShopsStaff, ...mapped];
-      setLocalStorageItem("restockr_staff", updatedStaffList);
-      notifyListeners();
-      return mapped;
+    cache.notifications = [notif, ...cache.notifications];
+    notifyListeners();
+  },
+
+  markNotificationsAsRead: async (shopId: string): Promise<void> => {
+    if (!supabase) return;
+
+    const { error } = await supabase
+      .from("notifications")
+      .update({ read: true })
+      .eq("shop_id", shopId)
+      .eq("read", false);
+
+    if (error) {
+      console.error("[Database] Failed to mark notifications as read:", error.message);
+      return;
     }
-  } catch (err) {
-    console.warn("[Supabase Staff Sync Exception]:", err);
-  }
 
-  return db.getStaff(shopId);
-}
+    cache.notifications = cache.notifications.map((n) =>
+      n.shop_id === shopId ? { ...n, read: true } : n
+    );
+    notifyListeners();
+  },
 
-// Global Supabase Realtime channel for staff updates
-if (typeof window !== "undefined" && supabase) {
-  try {
-    supabase
-      .channel("public:staff")
-      .on("postgres_changes", { event: "*", schema: "public", table: "staff" }, (payload) => {
-        const activeShopId = localStorage.getItem("restockr_currentShopId");
-        if (activeShopId) {
-          syncStaffWithSupabase(activeShopId);
-        }
-      })
-      .subscribe();
-  } catch (err) {
-    console.warn("[Supabase Staff Channel Exception]:", err);
-  }
-}
-
+  // ---- PASSWORDS (deprecated — now handled by Supabase Auth) ----
+  getPasswords: (): Record<string, string> => ({}),
+  savePassword: (_username: string, _password: string): void => {
+    // No-op: passwords are now managed by Supabase Auth
+  },
+};
