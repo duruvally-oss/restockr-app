@@ -2625,7 +2625,7 @@ _Message us now to reserve this device in stock!_`;
                   multiple
                   disabled={uploading}
                   onChange={async (e) => {
-                    const files = Array.from(e.target.files || []);
+                    const files: File[] = Array.from(e.target.files ?? []);
                     if (files.length > 0) {
                       localStorage.setItem("restockr_last_media_tab", "photos");
                       for (const file of files) {
