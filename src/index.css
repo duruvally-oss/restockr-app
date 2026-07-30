@@ -1,0 +1,72 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Outfit", "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Outfit", "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  
+  --color-brand-primary: #FFFFFF; /* High contrast White */
+  --color-brand-accent: #B7BCC7;  /* Ash Grey */
+  
+  --animate-pulse-slow: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-fade-in: fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  --animate-scale-up: scaleUp 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes scaleUp {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* Custom premium styling for glass effects and smooth styling */
+.glass-panel {
+  background: #1B1B1B;
+  border: 1px solid #2A2A2A;
+}
+
+.glass-panel-dark {
+  background: #121212;
+  border: 1px solid #2A2A2A;
+}
+
+/* Premium custom scrollbars optimized for dark theme */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2A2A2A;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #565656;
+}
+
+/* Base custom font application */
+body {
+  font-family: var(--font-sans);
+  background-color: #0A0A0A; /* Matte Black */
+  color: #FFFFFF; /* High contrast primary text */
+}
+
+/* Subtle visual animations */
+.transition-all-custom {
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Global input overrides to keep forms clean and legible in dark theme */
+input, select, textarea {
+  color-scheme: dark;
+}

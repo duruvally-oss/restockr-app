@@ -1,0 +1,6 @@
+{
+  "name": "Restockr",
+  "description": "A complete operating system for Nigerian gadget businesses, phone stores, and mobile resellers. Track inventory, manage sales, connect with staff via a WhatsApp Assistant emulator, and automatically publish a public reseller website.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
