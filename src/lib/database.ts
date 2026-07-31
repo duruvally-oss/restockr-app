@@ -550,6 +550,15 @@ export async function signOutFromSupabase(): Promise<void> {
   }
 }
 
+// Auth state listener — only fires callback on SIGNED_OUT, ignores token refresh
+export function onAuthStateChange(callback: (event: string, session: any) => void): () => void {
+  if (!supabase) return () => {};
+  const { data } = supabase.auth.onAuthStateChange((event, session) => {
+    callback(event, session);
+  });
+  return () => data.subscription.unsubscribe();
+}
+
 export async function restoreSession(): Promise<{ shop: Shop | null }> {
   if (!supabase) return { shop: null };
 

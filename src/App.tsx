@@ -10,6 +10,7 @@ import {
   registerShopWithCredentials,
   signOutFromSupabase,
   restoreSession,
+  onAuthStateChange,
 } from "./lib/database";
 import { Product, Sale, Customer, Staff, Shop, AppNotification } from "./types";
 import DashboardOverview from "./components/DashboardOverview";
@@ -48,7 +49,13 @@ export default function App() {
   // ----------------------------------------------------
   const [shops, setShops] = useState<Shop[]>([]);
   const [currentShop, setCurrentShop] = useState<Shop | null>(null);
+  const currentShopRef = useRef<Shop | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
+
+  // Keep ref in sync with state so stale closures always read the latest shop
+  useEffect(() => {
+    currentShopRef.current = currentShop;
+  }, [currentShop]);
 
   // Reactive DB States
   const [products, setProducts] = useState<Product[]>([]);
@@ -61,11 +68,12 @@ export default function App() {
   const [isSimulatedExpired, setIsSimulatedExpired] = useState(false);
 
   // Sync state from in-memory cache (kept fresh by realtime subscriptions)
+  // Uses currentShopRef to avoid stale closure capturing an old currentShop value
   const syncStates = () => {
     const updatedShops = db.getShops();
     setShops(updatedShops);
 
-    const activeShop = updatedShops.find(s => s.id === (currentShop?.id || "")) || null;
+    const activeShop = updatedShops.find(s => s.id === (currentShopRef.current?.id || "")) || null;
     if (activeShop) {
       setProducts(db.getProducts(activeShop.id));
       setSales(db.getSales(activeShop.id));
@@ -84,11 +92,13 @@ export default function App() {
   // Restore session on mount (auto-login from Supabase Auth)
   useEffect(() => {
     let unsubscribe: (() => void) | null = null;
+    let authUnsub: (() => void) | null = null;
     (async () => {
       const { shop } = await restoreSession();
       if (shop) {
         await loadShopData(shop.id);
         subscribeToRealtime(shop.id);
+        currentShopRef.current = shop;
         setCurrentShop(shop);
         setIsLoggedIn(true);
         setShops(db.getShops());
@@ -104,9 +114,26 @@ export default function App() {
       unsubscribe = subscribeToDBUpdates(() => {
         syncStates();
       });
+
+      // Listen for auth state changes — only act on genuine sign-out, not token refresh
+      authUnsub = onAuthStateChange((event, session) => {
+        if (event === "SIGNED_OUT" && !session) {
+          unsubscribeFromRealtime();
+          setIsLoggedIn(false);
+          currentShopRef.current = null;
+          setCurrentShop(null);
+          setProducts([]);
+          setSales([]);
+          setCustomers([]);
+          setStaff([]);
+          setNotifications([]);
+        }
+        // TOKEN_REFRESHED and INITIAL_SESSION are ignored — they don't indicate logout
+      });
     })();
     return () => {
       if (unsubscribe) unsubscribe();
+      if (authUnsub) authUnsub();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

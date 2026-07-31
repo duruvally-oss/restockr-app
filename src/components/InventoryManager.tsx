@@ -372,7 +372,69 @@ export default function InventoryManager({
     
     setIsConditionExpanded(true);
     setActiveDropdown(null);
+    clearDraft();
   };
+
+  // Draft auto-save — preserves in-progress form data across remounts/session interruptions
+  const DRAFT_KEY = `restockr_product_draft_${shopId}`;
+  const saveDraft = () => {
+    if (editingProduct) return; // Don't save drafts when editing existing products
+    const draft = {
+      formCategory, formBrand, customBrand, formModel, customModel, modelSearch,
+      formVariant, formStorage, customStorage, formQuantity, formSellingPrice,
+      formImages, formVideo, formFaceId, formNetwork, formBatteryHealthVal,
+      formWarranty, formConditionTags, customFaceId, customNetwork, formAdditionalNotes,
+    };
+    try { localStorage.setItem(DRAFT_KEY, JSON.stringify(draft)); } catch (e) { /* ignore */ }
+  };
+  const clearDraft = () => {
+    try { localStorage.removeItem(DRAFT_KEY); } catch (e) { /* ignore */ }
+  };
+
+  // Restore draft on mount (only if not editing and form is open via quick-add)
+  useEffect(() => {
+    if (editingProduct || !showAddFormImmediately) return;
+    try {
+      const saved = localStorage.getItem(DRAFT_KEY);
+      if (saved) {
+        const d = JSON.parse(saved);
+        if (d.formCategory) setFormCategory(d.formCategory);
+        if (d.formBrand) setFormBrand(d.formBrand);
+        if (d.customBrand !== undefined) setCustomBrand(d.customBrand);
+        if (d.formModel !== undefined) setFormModel(d.formModel);
+        if (d.customModel !== undefined) setCustomModel(d.customModel);
+        if (d.modelSearch !== undefined) setModelSearch(d.modelSearch);
+        if (d.formVariant !== undefined) setFormVariant(d.formVariant);
+        if (d.formStorage !== undefined) setFormStorage(d.formStorage);
+        if (d.customStorage !== undefined) setCustomStorage(d.customStorage);
+        if (d.formQuantity !== undefined) setFormQuantity(d.formQuantity);
+        if (d.formSellingPrice !== undefined) setFormSellingPrice(d.formSellingPrice);
+        if (d.formImages) setFormImages(d.formImages);
+        if (d.formVideo !== undefined) setFormVideo(d.formVideo);
+        if (d.formFaceId) setFormFaceId(d.formFaceId);
+        if (d.formNetwork) setFormNetwork(d.formNetwork);
+        if (d.formBatteryHealthVal) setFormBatteryHealthVal(d.formBatteryHealthVal);
+        if (d.formWarranty) setFormWarranty(d.formWarranty);
+        if (d.formConditionTags) setFormConditionTags(d.formConditionTags);
+        if (d.customFaceId !== undefined) setCustomFaceId(d.customFaceId);
+        if (d.customNetwork !== undefined) setCustomNetwork(d.customNetwork);
+        if (d.formAdditionalNotes !== undefined) setFormAdditionalNotes(d.formAdditionalNotes);
+      }
+    } catch (e) { /* ignore */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Auto-save draft whenever form fields change (debounced)
+  useEffect(() => {
+    if (editingProduct || !isFormOpen) return;
+    const timer = setTimeout(() => saveDraft(), 500);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [formCategory, formBrand, customBrand, formModel, customModel, modelSearch,
+      formVariant, formStorage, customStorage, formQuantity, formSellingPrice,
+      formImages, formVideo, formFaceId, formNetwork, formBatteryHealthVal,
+      formWarranty, formConditionTags, customFaceId, customNetwork, formAdditionalNotes,
+      isFormOpen, editingProduct]);
 
   // Populate form for editing
   const handleEditProduct = (product: Product) => {
