@@ -231,6 +231,7 @@ export default function App() {
 
     const result = await signInWithShopCredentials(authUsername, authPassword);
     if (result.success && result.shop) {
+      currentShopRef.current = result.shop;
       await loadShopData(result.shop.id);
       subscribeToRealtime(result.shop.id);
       setCurrentShop(result.shop);
@@ -269,6 +270,7 @@ export default function App() {
     });
 
     if (result.success && result.shop) {
+      currentShopRef.current = result.shop;
       await loadShopData(result.shop.id);
       subscribeToRealtime(result.shop.id);
       setCurrentShop(result.shop);
@@ -283,6 +285,7 @@ export default function App() {
   const handleLogout = async () => {
     unsubscribeFromRealtime();
     await signOutFromSupabase();
+    currentShopRef.current = null;
     setIsLoggedIn(false);
     setCurrentShop(null);
     resetQuickActions();
