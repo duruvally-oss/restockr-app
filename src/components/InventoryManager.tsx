@@ -496,27 +496,37 @@ export default function InventoryManager({
     setActiveDropdown(null);
   };
 
-  // Image Upload handler
+  // Image Upload handler — shows instant local preview, then uploads to storage and swaps in the permanent URL
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files: File[] = Array.from(e.target.files || []);
     if (files.length === 0) return;
 
-    try {
-      setIsUploadingImages(true);
-      for (const file of files) {
-        if (file.size > 10 * 1024 * 1024) {
-          alert(`Image ${file.name} exceeds 10MB size limit.`);
-          continue;
-        }
-        const permanentUrl = await uploadFileToSupabase(file, "image");
-        setFormImages(prev => [...prev, permanentUrl]);
-        changeMediaTab("photos");
+    setIsUploadingImages(true);
+    changeMediaTab("photos");
+
+    for (const file of files) {
+      if (file.size > 10 * 1024 * 1024) {
+        alert(`Image ${file.name} exceeds 10MB size limit.`);
+        continue;
       }
-    } catch (err: any) {
-      alert(err.message || "Failed to upload image to storage.");
-    } finally {
-      setIsUploadingImages(false);
+
+      // Instant local preview so the user sees the photo immediately
+      const localPreview = URL.createObjectURL(file);
+      const tempId = localPreview;
+      setFormImages(prev => [...prev, localPreview]);
+
+      try {
+        const permanentUrl = await uploadFileToSupabase(file, "image");
+        setFormImages(prev => prev.map(img => img === tempId ? permanentUrl : img));
+      } catch (err: any) {
+        // Remove the failed preview so the user knows it didn't work
+        setFormImages(prev => prev.filter(img => img !== tempId));
+        URL.revokeObjectURL(localPreview);
+        alert(err.message || `Failed to upload image "${file.name}". Please try again.`);
+      }
     }
+
+    setIsUploadingImages(false);
   };
 
   const handleVideoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -528,25 +538,20 @@ export default function InventoryManager({
       return;
     }
 
+    // Instant local preview so the user sees the video immediately
+    const localPreview = URL.createObjectURL(file);
+    setFormVideo(localPreview);
+    changeMediaTab("video");
+    setIsUploadingVideo(true);
+
     try {
-      setIsUploadingVideo(true);
-      try {
-        const permanentUrl = await uploadFileToSupabase(file, "video");
-        setFormVideo(permanentUrl);
-        changeMediaTab("video");
-      } catch (uploadErr) {
-        console.warn("[Video Upload] Storage upload unavailable, converting to local data URL:", uploadErr);
-        const reader = new FileReader();
-        reader.onload = () => {
-          if (typeof reader.result === "string") {
-            setFormVideo(reader.result);
-            changeMediaTab("video");
-          }
-        };
-        reader.readAsDataURL(file);
-      }
+      const permanentUrl = await uploadFileToSupabase(file, "video");
+      setFormVideo(permanentUrl);
+      URL.revokeObjectURL(localPreview);
     } catch (err: any) {
-      alert(err.message || "Failed to upload video clip.");
+      setFormVideo("");
+      URL.revokeObjectURL(localPreview);
+      alert(err.message || "Failed to upload video. Please check your connection and try again.");
     } finally {
       setIsUploadingVideo(false);
     }
@@ -563,9 +568,14 @@ export default function InventoryManager({
 
   const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmitting || isUploadingVideo || isUploadingImages) return;
+    if (isSubmitting || isUploadingVideo || isUploadingImages) {
+      if (isUploadingVideo || isUploadingImages) {
+        alert("Please wait for media uploads to finish before saving.");
+      }
+      return;
+    }
     setIsSubmitting(true);
-    
+
     try {
       // Determine Brand
       const finalBrand = formBrand === "Other" ? (customBrand.trim() || "Other") : formBrand;
@@ -590,8 +600,8 @@ export default function InventoryManager({
         return;
       }
 
-      // Default stock photos if none uploaded
-      let finalImages = [...formImages];
+      // Filter out any blob: URLs that failed to upload (safety net)
+      let finalImages = formImages.filter(img => !img.startsWith("blob:"));
       if (finalImages.length === 0) {
         if (formCategory === Category.Phones) {
           finalImages.push("https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?auto=format&fit=crop&q=80&w=600");
@@ -605,6 +615,9 @@ export default function InventoryManager({
           finalImages.push("https://images.unsplash.com/photo-1508685096489-7aacd43bd3b1?auto=format&fit=crop&q=80&w=600");
         }
       }
+
+      // Filter out blob: video URL that failed to upload
+      const finalVideo = formVideo && !formVideo.startsWith("blob:") ? formVideo : undefined;
 
       // Build conditions storage array
       const conditionList: string[] = [];
@@ -630,18 +643,20 @@ export default function InventoryManager({
         sellingPrice: price,
         batteryHealth: formBatteryHealthVal || undefined,
         warranty: formWarranty,
-        minimumStockThreshold: 2, // Default low stock helper
+        minimumStockThreshold: 2,
         condition: conditionList,
         productImages: finalImages,
-        productVideo: formVideo || undefined,
+        productVideo: finalVideo,
         status: formQuantity > 0 ? "Available" : "Sold Out",
         createdAt: editingProduct?.createdAt || new Date().toISOString()
       };
 
-      onSaveProduct(productData);
+      await onSaveProduct(productData);
       setIsFormOpen(false);
       resetForm();
       if (onCloseQuickForm) onCloseQuickForm();
+    } catch (err: any) {
+      alert(err.message || "Failed to save product. Please try again.");
     } finally {
       setIsSubmitting(false);
     }
@@ -2066,9 +2081,16 @@ export default function InventoryManager({
                   <button
                     type="submit"
                     id="btn-save-stock-item"
-                    className="px-6 py-3 bg-white text-black hover:bg-zinc-200 rounded-xl text-xs font-bold font-display uppercase tracking-wider transition-all cursor-pointer flex items-center gap-2 shadow-lg"
+                    disabled={isSubmitting || isUploadingImages || isUploadingVideo}
+                    className="px-6 py-3 bg-white text-black hover:bg-zinc-200 rounded-xl text-xs font-bold font-display uppercase tracking-wider transition-all cursor-pointer flex items-center gap-2 shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    <Save className="w-4 h-4" /> Save Product
+                    {isSubmitting ? (
+                      <><Loader2 className="w-4 h-4 animate-spin" /> Saving...</>
+                    ) : isUploadingImages || isUploadingVideo ? (
+                      <><Loader2 className="w-4 h-4 animate-spin" /> Uploading...</>
+                    ) : (
+                      <><Save className="w-4 h-4" /> Save Product</>
+                    )}
                   </button>
                 )}
               </div>

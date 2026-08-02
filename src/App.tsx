@@ -1072,9 +1072,8 @@ export default function App() {
                     shopId={currentShop.id}
                     shop={currentShop}
                     products={products}
-                    onSaveProduct={(p) => {
-                      db.saveProduct(p);
-                      // log audit
+                    onSaveProduct={async (p) => {
+                      await db.saveProduct(p);
                       db.addAuditLog(currentShop.id, "Owner", "Owner", "Product Modified", `Modified product: ${p.brand} ${p.model} (${p.storage})`);
                     }}
                     onDeleteProduct={(id) => {
@@ -1181,7 +1180,7 @@ export default function App() {
                 products={products}
                 sales={sales}
                 staffList={staff}
-                onSaveProduct={(p) => db.saveProduct(p)}
+                onSaveProduct={async (p) => db.saveProduct(p)}
                 onSaveSale={(s) => db.saveSale(s)}
                 onUndoLastSale={async (shopId, saleId, perf) => db.undoSale(shopId, saleId, perf)}
                 isExpired={isSimulatedExpired}

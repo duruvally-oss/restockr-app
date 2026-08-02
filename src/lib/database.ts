@@ -713,7 +713,7 @@ export const db = {
 
     if (error) {
       console.error("[Database] Failed to save product:", error.message);
-      return;
+      throw new Error(`Failed to save product: ${error.message}`);
     }
 
     const idx = cache.products.findIndex((p) => p.id === product.id);
